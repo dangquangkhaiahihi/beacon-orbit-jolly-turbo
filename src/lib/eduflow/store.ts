@@ -2,7 +2,7 @@ import { create } from "zustand";
 import { toast } from "sonner";
 import type {
   AbsentCaseStatus, AbsentDeduct, BranchDraft, ClassDraft, CourseDraft, Device, EnrollDraft, Graph, GuardianDraft, LessonTab, MakeupGuestPick, MakeupSlot, ModalKind,
-  PayDraft, PeekFrame, PeekKind, RemindItem, Role, RoomDraft, RouteName, RouteState, StaffDraft, StudentDraft, TeacherDraft, TenantProfile, ZTab,
+  PayDraft, PeekFrame, PeekKind, RecurrenceDay, RemindItem, Role, RoomDraft, RouteName, RouteState, StaffDraft, StudentDraft, TeacherDraft, TenantProfile, ZTab,
 } from "./types";
 import {
   LS, actorOf, addMinutesHhmm, classInstanceName, classIsOpenEnded, classLife, clsName, contentKeyOf, daysBetween, enumerateRecurrence, expectedRunout, extraBurnsAhead, fmtDay, fmtShort, ledgerModeOf, nid, normalizeRecurrence, one, phoneOk, remainingFromPaidThrough, rmName, schoolOrder, statusVn, stuName, tchName, toVnIso, weekdayOf,
@@ -17,6 +17,13 @@ import {
 } from "./draft";
 import { buildCommit, canGotoPhase, cleanDump, guessMap, linkDump, mapsFor, maxReached, phaseIndex, prevIngestPhase, reachedOf, sheetKey, type ConflictAction, type DupAction, type FieldKey, type IngestPhase, type ParsedFile, type SheetKind } from "./ingest";
 import { buildReview, detectConflicts, reviewPending } from "./ingest-review";
+import {
+  clashNote, occupancyOnDate, projectedOccupancy, roomClash, slotClash, teacherClash,
+  type ClashParty, type OccupancyHold, type SlotClash,
+} from "./clash";
+import { applyClassSchedule, applyOccurrence, materializeNewClass, type OccurrencePatch, type RecurrencePatch, type ScheduleResult } from "./schedule";
+export { clashNote, occupancyOnDate, projectedOccupancy, roomClash, slotClash, teacherClash };
+export type { ClashParty, OccupancyHold, SlotClash, ScheduleResult, RecurrencePatch, OccurrencePatch };
 
 function enrollOf(g: Graph, studentId: string, classId: string) {
   return g.enrollments.find((e) => e.student_id === studentId && e.class_id === classId);
@@ -110,153 +117,6 @@ export function nextSiblingLessons(g: Graph, sourceLessonId: string) {
   return g.lessons
     .filter((l) => ids.has(l.class_id) && l.start > les.start && l.status !== "cancelled" && !l.is_makeup)
     .sort((a, b) => a.start.localeCompare(b.start));
-}
-function overlaps(a0: string, a1: string, b0: string, b1: string) {
-  return new Date(a0) < new Date(b1) && new Date(b0) < new Date(a1);
-}
-export function teacherClash(g: Graph, teacherId: string, start: string, end: string, exceptId?: string) {
-  return g.lessons.filter((l) => l.teacher_id === teacherId && l.status !== "cancelled" && l.id !== exceptId && overlaps(l.start, l.end, start, end));
-}
-export function roomClash(g: Graph, roomId: string, start: string, end: string, exceptId?: string) {
-  const room = one(g.rooms, roomId);
-  if (!room || room.type === "online") return [];
-  return g.lessons.filter((l) => l.room_id === roomId && l.status !== "cancelled" && l.id !== exceptId && overlaps(l.start, l.end, start, end));
-}
-export type ClashParty = {
-  class_id: string;
-  teacher_id: string;
-  room_id: string;
-  lesson_id: string | null;
-};
-export type SlotClash = {
-  teacher: ClashParty[];
-  room: ClashParty[];
-  kind: "teacher" | "room" | "both" | null;
-};
-function asParty(l: Graph["lessons"][number]): ClashParty {
-  return { class_id: l.class_id, teacher_id: l.teacher_id, room_id: l.room_id, lesson_id: l.id };
-}
-export function slotClash(g: Graph, teacherId: string, roomId: string, start: string, end: string): SlotClash {
-  const teacher = teacherClash(g, teacherId, start, end).map(asParty);
-  const room = roomClash(g, roomId, start, end).map(asParty);
-  const date = start.slice(0, 10);
-  const seenT = new Set(teacher.map((p) => p.class_id));
-  const seenR = new Set(room.map((p) => p.class_id));
-  for (const c of g.classes) {
-    if (!c.active || c.start_date > date) continue;
-    if (c.end_date && c.end_date < date) continue;
-    const rec = normalizeRecurrence(c.recurrence);
-    const day = rec.days.find((d) => d.weekday === weekdayOf(date));
-    if (!day) continue;
-    const hhmm = day.start_time.slice(0, 5);
-    const eh = addMinutesHhmm(hhmm, rec.duration_min);
-    if (!eh) continue;
-    const st = `${date}T${hhmm}:00+07:00`;
-    const en = `${date}T${eh}:00+07:00`;
-    if (!overlaps(st, en, start, end)) continue;
-    const party: ClashParty = { class_id: c.id, teacher_id: c.default_teacher_id, room_id: c.default_room_id, lesson_id: null };
-    if (c.default_teacher_id === teacherId && !seenT.has(c.id)) {
-      teacher.push(party);
-      seenT.add(c.id);
-    }
-    const rm = one(g.rooms, c.default_room_id);
-    if (rm && rm.type !== "online" && c.default_room_id === roomId && !seenR.has(c.id)) {
-      room.push(party);
-      seenR.add(c.id);
-    }
-  }
-  const kind = teacher.length && room.length ? "both" : teacher.length ? "teacher" : room.length ? "room" : null;
-  return { teacher, room, kind };
-}
-export function clashNote(g: Graph, hit: SlotClash) {
-  const bits: string[] = [];
-  const t = hit.teacher[0];
-  const r = hit.room[0];
-  if (t) bits.push(`GV ${tchName(g, t.teacher_id)} đang ${clsName(g, t.class_id)}`);
-  if (r) bits.push(`phòng ${rmName(g, r.room_id)} đang ${clsName(g, r.class_id)}`);
-  return bits.join(" · ");
-}
-
-export type OccupancyHold = {
-  class_id: string;
-  teacher_id: string;
-  room_id: string;
-  start: string;
-  end: string;
-  lesson_id: string | null;
-};
-
-export function occupancyOnDate(g: Graph, date: string): OccupancyHold[] {
-  const holds: OccupancyHold[] = [];
-  const seen = new Set<string>();
-  for (const l of g.lessons) {
-    if (l.status === "cancelled") continue;
-    if (l.start.slice(0, 10) !== date) continue;
-    holds.push({
-      class_id: l.class_id,
-      teacher_id: l.teacher_id,
-      room_id: l.room_id,
-      start: l.start,
-      end: l.end,
-      lesson_id: l.id,
-    });
-    seen.add(l.class_id);
-  }
-  for (const c of g.classes) {
-    if (!c.active || seen.has(c.id)) continue;
-    if (c.start_date > date) continue;
-    if (c.end_date && c.end_date < date) continue;
-    const rec = normalizeRecurrence(c.recurrence);
-    const day = rec.days.find((d) => d.weekday === weekdayOf(date));
-    if (!day) continue;
-    const hhmm = day.start_time.slice(0, 5);
-    const eh = addMinutesHhmm(hhmm, rec.duration_min);
-    if (!eh) continue;
-    holds.push({
-      class_id: c.id,
-      teacher_id: c.default_teacher_id,
-      room_id: c.default_room_id,
-      start: `${date}T${hhmm}:00+07:00`,
-      end: `${date}T${eh}:00+07:00`,
-      lesson_id: null,
-    });
-  }
-  return holds.sort((a, b) => a.start.localeCompare(b.start));
-}
-
-export function projectedOccupancy(g: Graph, from: string, to: string): OccupancyHold[] {
-  const hasLesson = new Set(
-    g.lessons
-      .filter((l) => l.status !== "cancelled")
-      .map((l) => `${l.class_id}:${l.start.slice(0, 10)}`),
-  );
-  const out: OccupancyHold[] = [];
-  for (const c of g.classes) {
-    if (!c.active) continue;
-    const rec = normalizeRecurrence(c.recurrence);
-    if (!rec.days.length) continue;
-    const slots = enumerateRecurrence({
-      days: rec.days,
-      duration_min: rec.duration_min,
-      start_date: c.start_date,
-      end_date: c.end_date && c.end_date < to ? c.end_date : to,
-      today: from,
-      horizonDays: Math.max(21, daysBetween(from, to) + 1),
-    });
-    for (const s of slots) {
-      if (s.date < from || s.date > to) continue;
-      if (hasLesson.has(`${c.id}:${s.date}`)) continue;
-      out.push({
-        class_id: c.id,
-        teacher_id: c.default_teacher_id,
-        room_id: c.default_room_id,
-        start: s.start,
-        end: s.end,
-        lesson_id: null,
-      });
-    }
-  }
-  return out;
 }
 export function unpaid(enr: Graph["enrollments"][number] | undefined) {
   if (!enr) return false;
@@ -552,7 +412,7 @@ type EduState = {
   markHw: (hwId: string, studentId: string, mark: string) => void;
   addNote: (lessonId: string, body: string) => void;
   linkOanh: () => void;
-  createAdhoc: (p: { class_id: string; teacher_id: string; room_id: string; start: string }) => boolean;
+  createAdhoc: (p: { class_id: string; teacher_id: string; room_id: string; start: string; duration_min?: number; stay?: boolean }) => boolean;
   createMakeupLesson: (p: {
     class_id: string;
     teacher_id: string;
@@ -573,7 +433,7 @@ type EduState = {
   updateRoom: (id: string, d: RoomDraft) => void;
   createTeacher: (d: TeacherDraft) => void;
   updateTeacher: (id: string, d: TeacherDraft) => void;
-  createClass: (draft: ClassDraft) => void;
+  createClass: (draft: ClassDraft) => ScheduleResult | null;
   createCourse: (d: CourseDraft) => void;
   createEnroll: (d: EnrollDraft) => string | null;
   updateEnroll: (id: string, d: EnrollDraft) => void;
@@ -587,7 +447,12 @@ type EduState = {
   deleteTeacher: (id: string) => void;
   deleteStudent: (id: string) => void;
   deleteClass: (id: string) => void;
-  updateClass: (id: string, d: { name: string; teacher_id: string; room_id: string; capacity: number }) => void;
+  updateClass: (id: string, d: {
+    name: string; teacher_id: string; room_id: string; capacity: number;
+    duration_min?: number; days?: RecurrenceDay[]; start_date?: string; end_date?: string | null; absent_deduct?: AbsentDeduct;
+  }) => ScheduleResult | null;
+  updateLessonOccurrence: (p: OccurrencePatch) => ScheduleResult | null;
+  applyThisAndFuture: (classId: string, fromLessonId: string, patch: RecurrencePatch) => ScheduleResult | null;
   updateCourse: (id: string, d: CourseDraft) => void;
   deleteCourse: (id: string) => void;
   deletePayment: (id: string) => void;
@@ -1252,9 +1117,13 @@ export const useEdu = create<EduState>((set, get) => ({
   createAdhoc: (p) => {
     const g = get().graph;
     if (!g) return false;
+    const dur = p.duration_min && p.duration_min > 0 ? p.duration_min : 90;
     const start = toVnIso(p.start, 0);
-    const end = toVnIso(p.start, 90);
-    if (teacherClash(g, p.teacher_id, start, end).length || roomClash(g, p.room_id, start, end).length) {
+    const endHh = addMinutesHhmm(start.slice(11, 16), dur);
+    if (!endHh) { toast("Giờ kết thúc vượt quá ngày"); return false; }
+    const end = `${start.slice(0, 10)}T${endHh}:00+07:00`;
+    const hit = slotClash(g, p.teacher_id, p.room_id, start, end);
+    if (hit.kind) {
       toast("Chặn — trùng GV/phòng");
       return false;
     }
@@ -1267,7 +1136,7 @@ export const useEdu = create<EduState>((set, get) => ({
     bump(set, get);
     set({ modal: null });
     toast("Đã tạo buổi rời");
-    get().go("buoi-detail", les.id);
+    if (!p.stay) get().go("buoi-detail", les.id);
     return true;
   },
   createMakeupLesson: (p) => {
@@ -1563,38 +1432,26 @@ export const useEdu = create<EduState>((set, get) => ({
   },
   createClass: (draft) => {
     const g = get().graph;
-    if (!g) return;
+    if (!g) return null;
     const course = one(g.courses, draft.course_id);
-    if (!course) { toast("Chọn khóa học — lớp là một ca của khóa"); return; }
-    if (!draft.days.length) { toast("Chọn ít nhất một thứ trong tuần"); return; }
-    if (!draft.duration_min || draft.duration_min % 30 !== 0) { toast("Thời lượng buổi bước 30 phút"); return; }
+    if (!course) { toast("Chọn khóa học — lớp là một ca của khóa"); return null; }
+    if (!draft.days.length) { toast("Chọn ít nhất một thứ trong tuần"); return null; }
+    if (!draft.duration_min || draft.duration_min % 30 !== 0) { toast("Thời lượng buổi bước 30 phút"); return null; }
     const days = [...draft.days]
       .map((d) => ({ weekday: d.weekday, start_time: d.start_time.slice(0, 5) }))
       .sort((a, b) => schoolOrder(a.weekday) - schoolOrder(b.weekday));
     for (const day of days) {
       if (!addMinutesHhmm(day.start_time, draft.duration_min)) {
         toast(`${day.start_time} + ${draft.duration_min} phút vượt quá ngày`);
-        return;
+        return null;
       }
     }
     const auto = classInstanceName(course.name, { days });
     const name = (draft.name.trim() && draft.name.trim() !== course.name) ? draft.name.trim() : auto;
-    const slots = enumerateRecurrence({
-      days,
-      duration_min: draft.duration_min,
-      start_date: draft.start_date, end_date: draft.end_date, today: g.meta.today,
-    });
-    const keep = slots.filter((s) => !slotClash(g, draft.teacher_id, draft.room_id, s.start, s.end).kind);
-    const skipped = slots.length - keep.length;
-    if (!keep.length) {
-      toast(skipped ? "Không mở được — mọi buổi trùng GV/phòng. Đổi lịch hoặc tài nguyên." : "Không có buổi trong khoảng ngày");
-      return;
-    }
-    const id = nid("cls");
     const first = days[0];
     const mode = ledgerModeOf(course.plan.model);
-    g.classes.unshift({
-      id, branch_id: "br_cg", name, content_key: course.content_key, course_id: course.id,
+    const row = {
+      id: nid("cls"), branch_id: "br_cg", name, content_key: course.content_key, course_id: course.id,
       default_teacher_id: draft.teacher_id,
       default_room_id: draft.room_id, capacity: draft.capacity || 12,
       recurrence: {
@@ -1610,17 +1467,18 @@ export const useEdu = create<EduState>((set, get) => ({
       course_total_sessions: course.plan.course_sessions || course.plan.pack_sessions,
       active: true,
       absent_deduct: draft.absent_deduct === "on_makeup" ? "on_makeup" : "always",
-    });
-    for (const s of keep) {
-      g.lessons.push({
-        id: nid("les"), class_id: id, branch_id: "br_cg", teacher_id: draft.teacher_id, room_id: draft.room_id,
-        start: s.start, end: s.end, status: "scheduled", is_makeup: false, original_lesson_id: null, substitute: false,
-      });
+    };
+    const result = materializeNewClass(g, row);
+    if (!result.applied) {
+      toast(result.message);
+      return result;
     }
     bump(set, get);
     set({ modal: null, editId: null });
-    toast(skipped ? `Đã mở lớp từ khóa · ${keep.length} buổi, bỏ ${skipped} trùng` : `Đã mở lớp từ khóa · ${keep.length} buổi trên lịch`);
-    get().go("lop-detail", id);
+    toast(result.message);
+    if (result.capacityWarn) toast(result.capacityWarn);
+    if (result.status !== "cover") get().go("lop-detail", row.id);
+    return result;
   },
   createEnroll: (d) => {
     const g = get().graph;
@@ -1816,19 +1674,67 @@ export const useEdu = create<EduState>((set, get) => ({
   },
   updateClass: (id, d) => {
     const g = get().graph;
-    if (!g) return;
+    if (!g) return null;
     const c = one(g.classes, id);
-    if (!c) return;
-    if (!d.name.trim()) { toast("Thiếu tên lớp"); return; }
-    if (!d.teacher_id || !d.room_id) { toast("Chọn giáo viên và phòng"); return; }
-    if (!(d.capacity >= 1)) { toast("Sĩ số ≥ 1"); return; }
-    c.name = d.name.trim();
-    c.default_teacher_id = d.teacher_id;
-    c.default_room_id = d.room_id;
-    c.capacity = d.capacity;
+    if (!c) return null;
+    if (!d.name.trim()) { toast("Thiếu tên lớp"); return null; }
+    if (!d.teacher_id || !d.room_id) { toast("Chọn giáo viên và phòng"); return null; }
+    if (!(d.capacity >= 1)) { toast("Sĩ số ≥ 1"); return null; }
+    if (d.absent_deduct) c.absent_deduct = d.absent_deduct;
+    if (!d.days?.length) {
+      c.name = d.name.trim();
+      c.capacity = d.capacity;
+      c.default_teacher_id = d.teacher_id;
+      c.default_room_id = d.room_id;
+      bump(set, get);
+      set({ modal: null, editId: null });
+      toast("Đã lưu lớp");
+      return { status: "ok", message: "Đã lưu lớp", phase: "running", clashN: 0, clashes: [], frozenN: 0, mutableN: 0, created: 0, patched: 0, cancelled: 0, studentWarns: [], applied: true, classId: id };
+    }
+    const rec = normalizeRecurrence(c.recurrence);
+    const result = applyClassSchedule(g, id, {
+      days: d.days,
+      duration_min: d.duration_min || rec.duration_min,
+      start_date: d.start_date || c.start_date,
+      end_date: d.end_date === undefined ? c.end_date : d.end_date,
+      teacher_id: d.teacher_id,
+      room_id: d.room_id,
+      name: d.name,
+      capacity: d.capacity,
+    }, "series");
+    if (!result.applied) {
+      toast(result.message);
+      return result;
+    }
     bump(set, get);
     set({ modal: null, editId: null });
-    toast("Đã lưu lớp");
+    toast(result.message);
+    if (result.capacityWarn) toast(result.capacityWarn);
+    for (const w of result.studentWarns.slice(0, 3)) toast(w);
+    return result;
+  },
+  updateLessonOccurrence: (p) => {
+    const g = get().graph;
+    if (!g) return null;
+    const result = applyOccurrence(g, p);
+    if (!result.applied) { toast(result.message); return result; }
+    bump(set, get);
+    set({ modal: null, editId: null });
+    toast(result.message);
+    return result;
+  },
+  applyThisAndFuture: (classId, fromLessonId, patch) => {
+    const g = get().graph;
+    if (!g) return null;
+    const les = one(g.lessons, fromLessonId);
+    if (!les) { toast("Không có buổi"); return null; }
+    const result = applyClassSchedule(g, classId, patch, "this_and_future", { fromStart: les.start });
+    if (!result.applied) { toast(result.message); return result; }
+    bump(set, get);
+    set({ modal: null, editId: null });
+    toast(result.message);
+    if (result.capacityWarn) toast(result.capacityWarn);
+    return result;
   },
   deleteCourse: (id) => {
     const g = get().graph;

@@ -92,6 +92,7 @@ export function Lesson() {
         trail={[{ label: "Hôm nay", go: "hom-nay" }, { label: "Buổi", go: "buoi" }, { label: clsName(g, les.class_id).split("—")[0].trim() }]}
         actions={
           <>
+            {canSubOrCancel(role) ? <Button variant="outline" onClick={() => setModal("lesson-sched", les.id)}>Đổi lịch</Button> : null}
             {canSubOrCancel(role) ? <Button variant="outline" onClick={() => setModal("sub")}>Dạy hộ</Button> : null}
             {canSubOrCancel(role) ? <Button variant="ghost" onClick={() => cancelLesson(les.id)}>Hủy buổi</Button> : null}
             <Button data-slot="dong-buoi" onClick={() => completeLesson(les.id)} disabled={closed}>

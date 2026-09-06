@@ -14,6 +14,7 @@ import {
 import { ThuPhi, SoThu } from "./thu-phi";
 import { NhacNap } from "./remind-batch";
 import { ClassCreatePage } from "./class-form";
+import { LessonSchedDialog } from "./lesson-sched";
 import { VangPage, MakeupCreatePage } from "./makeup-form";
 import { CourseCreateDialog } from "./course-form";
 import { ErpDialogs } from "./erp-forms";
@@ -194,6 +195,7 @@ export function EduFlowApp() {
               </>
             )}
             <Modals />
+            <LessonSchedDialog />
             <CourseCreateDialog />
             <ErpDialogs />
             <PayDialog />

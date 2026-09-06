@@ -36,7 +36,7 @@ export type ClassLife = "running" | "cancelled" | "finished";
 export type ZTab = "z0" | "z1" | "z2";
 export type ModalKind =
   | "adhoc" | "sub" | "class" | "student" | "room" | "teacher" | "staff"
-  | "enroll" | "branch" | "guardian" | "pay" | "course" | null;
+  | "enroll" | "branch" | "guardian" | "pay" | "course" | "lesson-sched" | null;
 export type AbsentDeduct = "always" | "on_makeup";
 export type BillingMode = "monthly" | "prepaid_session" | "course";
 
@@ -221,6 +221,7 @@ export type Graph = {
   lessons: Array<{
     id: string; class_id: string; branch_id: string; teacher_id: string; room_id: string;
     start: string; end: string; status: string; is_makeup: boolean; original_lesson_id: string | null; substitute: boolean;
+    override?: boolean;
   }>;
   attendance: Array<{ id: string; lesson_id: string; student_id: string; enrollment_id: string; status: string; reason: string | null; unpaid_flag: boolean }>;
   makeups: Array<{

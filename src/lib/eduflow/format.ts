@@ -1,4 +1,4 @@
-import type { ChargeModel, ClassLife, Graph, PromoKind, Promotion, Recurrence, RecurrenceDay, TuitionPlan } from "./types";
+import type { ChargeModel, ClassLife, Graph, PromoKind, Promotion, Recurrence, RecurrenceDay, TuitionPlan } from "./types.ts";
 
 export const WD = ["CN", "T2", "T3", "T4", "T5", "T6", "T7"];
 export const LS = "eduflow-impact-v5";
@@ -569,11 +569,12 @@ export function enumerateRecurrence(opts: {
   end_date: string | null;
   today: string;
   horizonDays?: number;
+  fromDate?: string;
 }) {
-
   const byWd = new Map(opts.days.map((d) => [d.weekday, d.start_time.slice(0, 5)]));
   const horizon = opts.horizonDays ?? 42;
-  const from = opts.start_date < opts.today ? opts.today : opts.start_date;
+  const floor = opts.fromDate || (opts.start_date < opts.today ? opts.today : opts.start_date);
+  const from = floor < opts.start_date ? opts.start_date : floor;
   const cap = addDays(from, horizon);
   const to = opts.end_date && opts.end_date < cap ? opts.end_date : cap;
   const slots: Array<{ date: string; start: string; end: string }> = [];

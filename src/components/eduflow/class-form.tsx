@@ -11,8 +11,10 @@ import {
   DURATION_MINS, TIME_SLOTS, WD, addMinutesHhmm, classInstanceName, clsName, enumerateRecurrence, fmtDay, fmtTime, formatRecurrence, nextOnWeekday, one, pad, planLabel, rmName, schoolOrder, tchName, weekdayOf,
 } from "@/lib/eduflow/format";
 import { canWrite } from "@/lib/eduflow/roles";
-import { clashNote, occupancyOnDate, slotClash, useEdu, type OccupancyHold } from "@/lib/eduflow/store";
+import { clashNote, occupancyOnDate, slotClash, useEdu, type OccupancyHold, type ScheduleResult } from "@/lib/eduflow/store";
 import type { Graph, RecurrenceDay, AbsentDeduct } from "@/lib/eduflow/types";
+import { classPhase } from "@/lib/eduflow/schedule";
+import { ClashBlockDialog, ClashCoverDialog } from "./clash-dialog";
 import type { CalendarEvent, CalendarView } from "@/components/reui/event-calendar/event-calendar-types";
 import { cn } from "@/lib/utils";
 import { PageHead } from "./atoms";
@@ -59,10 +61,16 @@ export function ClassCreatePage() {
   const role = useEdu((s) => s.role);
   const setModal = useEdu((s) => s.setModal);
   const createClass = useEdu((s) => s.createClass);
+  const updateClass = useEdu((s) => s.updateClass);
+  const go = useEdu((s) => s.go);
   const openPeek = useEdu((s) => s.openPeek);
   const phone = useEdu((s) => s.device) === "phone";
   const preset = useEdu((s) => s.route.id);
   const today = g.meta.today;
+  const editClass = preset ? g.classes.find((c) => c.id === preset) : undefined;
+  const editing = !!editClass;
+  const phase = editClass ? classPhase(g, editClass) : "not_started";
+  const locked = phase === "finished" || phase === "cancelled";
   const courses = g.courses.filter((c) => c.active);
   const write = canWrite(role, "class");
 
@@ -84,10 +92,32 @@ export function ClassCreatePage() {
   const [resourceMode, setResourceMode] = useState<"room" | "teacher">("room");
   const [focusDate, setFocusDate] = useState(today);
   const [phonePane, setPhonePane] = useState<"form" | "cal">("form");
+  const [pending, setPending] = useState<ScheduleResult | null>(null);
+  const [coverOpen, setCoverOpen] = useState(false);
+  const [blockOpen, setBlockOpen] = useState(false);
 
   const course = courseId ? one(g.courses, courseId) : undefined;
 
   useEffect(() => {
+    if (editClass) {
+      const rec = { duration_min: editClass.recurrence.duration_min, days: editClass.recurrence.days || [] };
+      const normalized = rec.days.length ? rec.days : (editClass.recurrence.weekdays || []).map((w) => ({ weekday: w, start_time: editClass.recurrence.start_time || "09:30" }));
+      setCourseId(editClass.course_id || "");
+      setName(editClass.name);
+      setNameLocked(true);
+      setTch(editClass.default_teacher_id);
+      setRm(editClass.default_room_id);
+      setCapacity(String(editClass.capacity));
+      setWeekdays(normalized.map((d) => String(d.weekday)));
+      setStarts(Object.fromEntries(normalized.map((d) => [String(d.weekday), d.start_time.slice(0, 5)])));
+      setDuration(editClass.recurrence.duration_min || 90);
+      setStartDate(editClass.start_date);
+      setHasEnd(!!editClass.end_date);
+      setEndDate(editClass.end_date || "");
+      setAbsentDeduct(editClass.absent_deduct === "on_makeup" ? "on_makeup" : "always");
+      setFocusDate(editClass.start_date > today ? editClass.start_date : today);
+      return;
+    }
     const hit = preset && g.courses.some((c) => c.id === preset) ? preset : (courses[0]?.id || "");
     setCourseId(hit);
     const wd = String(weekdayOf(g.meta.today));
@@ -153,7 +183,7 @@ export function ClassCreatePage() {
 
   const clashRows = useMemo(() => {
     return slots.flatMap((s) => {
-      const hit = slotClash(g, teacherId, roomId, s.start, s.end);
+      const hit = slotClash(g, teacherId, roomId, s.start, s.end, editing ? { exceptClassId: editClass.id } : undefined);
       if (!hit.kind) return [];
       const parties = [...hit.teacher, ...hit.room];
       return [{
@@ -191,7 +221,7 @@ export function ClassCreatePage() {
 
   const extraEvents = useMemo<CalendarEvent<LessonEventData>[]>(() => {
     return slots.map((s) => {
-      const hit = slotClash(g, teacherId, roomId, s.start, s.end);
+      const hit = slotClash(g, teacherId, roomId, s.start, s.end, editing ? { exceptClassId: editClass.id } : undefined);
       const note = hit.kind ? clashNote(g, hit) : `${rmName(g, roomId)} · ${tchName(g, teacherId)}`;
       return {
         id: `draft:${s.start}`,
@@ -221,18 +251,53 @@ export function ClassCreatePage() {
   }
 
   function save() {
-    if (!courseId || !write || invalid) return;
-    createClass({
+    if (locked || !write || invalid) return;
+    if (clashN >= 5) {
+      setPending({
+        status: "block",
+        message: `${clashN} buổi trùng`,
+        phase,
+        clashN,
+        clashes: clashRows.map((r) => ({ date: r.start.slice(0, 10), start: r.start, end: r.end, hit: slotClash(g, teacherId, roomId, r.start, r.end, editing ? { exceptClassId: editClass!.id } : undefined), note: r.note })),
+        frozenN: 0,
+        mutableN: okSlots,
+        created: 0,
+        patched: 0,
+        cancelled: 0,
+        studentWarns: [],
+        applied: false,
+      });
+      setBlockOpen(true);
+      return;
+    }
+    const draft = {
       course_id: courseId,
       name, teacher_id: teacherId, room_id: roomId, capacity: Number(capacity) || 12,
       duration_min: duration, days,
       start_date: startDate || today, end_date: hasEnd && endDate ? endDate : null,
       absent_deduct: absentDeduct,
-    });
+    };
+    const result = editing
+      ? updateClass(editClass.id, draft)
+      : (!courseId ? null : createClass(draft));
+    if (!result) return;
+    if (result.status === "block") { setPending(result); setBlockOpen(true); return; }
+    if (result.status === "cover") { setPending(result); setCoverOpen(true); return; }
+    if (editing) go("lop-detail", editClass.id);
   }
 
   const form = (
     <div className={cn("space-y-4", phone ? "p-3" : "p-5")} data-slot="class-form">
+      {editing ? (
+        <Alert data-slot="class-life-banner" className={locked ? "border-bad/30 bg-bad-soft" : undefined}>
+          <AlertTitle>
+            {locked ? "Lớp đã kết thúc — không đổi lịch"
+              : phase === "running"
+                ? `${g.lessons.filter((l) => l.class_id === editClass.id && l.start <= g.meta.clock && l.status !== "cancelled").length} buổi đã diễn ra giữ nguyên · ${okSlots} buổi tương lai sẽ đổi`
+                : "Lớp chưa bắt đầu — đổi lịch toàn bộ"}
+          </AlertTitle>
+        </Alert>
+      ) : null}
       <section className="space-y-3">
         <p className="text-xs font-semibold tracking-wide text-muted-foreground uppercase">Khóa · tài nguyên</p>
         {courses.length ? (
@@ -241,7 +306,7 @@ export function ClassCreatePage() {
               <Label>Khóa học</Label>
               {write ? <button type="button" className="text-xs text-muted-foreground hover:underline" onClick={() => setModal("course")}>Tạo khóa mới</button> : null}
             </div>
-            <Select value={courseId} onValueChange={pickCourse}>
+            <Select value={courseId} onValueChange={pickCourse} disabled={editing}>
               <SelectTrigger className="w-full min-h-11" data-slot="class-course"><SelectValue placeholder="Chọn khóa" /></SelectTrigger>
               <SelectContent>
                 {courses.map((c) => <SelectItem key={c.id} value={c.id}>{c.name}</SelectItem>)}
@@ -260,26 +325,26 @@ export function ClassCreatePage() {
         )}
         <div className="space-y-1.5">
           <Label htmlFor="cls-name">Tên lớp (ca)</Label>
-          <Input id="cls-name" value={name} onChange={(e) => { setNameLocked(true); setName(e.target.value); }} placeholder="Toán 9 · T7–CN" />
+          <Input id="cls-name" value={name} disabled={locked} onChange={(e) => { setNameLocked(true); setName(e.target.value); }} placeholder="Toán 9 · T7–CN" />
         </div>
         <div className="grid grid-cols-1 gap-3">
           <div className="space-y-1.5">
             <Label>Giáo viên</Label>
-            <Select value={teacherId} onValueChange={setTch}><SelectTrigger className="w-full min-h-11" data-slot="class-teacher"><SelectValue /></SelectTrigger><SelectContent>{g.teachers.map((t) => <SelectItem key={t.id} value={t.id}>{t.name}</SelectItem>)}</SelectContent></Select>
+            <Select value={teacherId} onValueChange={setTch} disabled={locked}><SelectTrigger className="w-full min-h-11" data-slot="class-teacher"><SelectValue /></SelectTrigger><SelectContent>{g.teachers.filter((t) => t.active || t.id === teacherId).map((t) => <SelectItem key={t.id} value={t.id}>{t.name}{t.active ? "" : " · ngưng"}</SelectItem>)}</SelectContent></Select>
           </div>
           <div className="space-y-1.5">
             <Label>Phòng</Label>
-            <Select value={roomId} onValueChange={setRm}><SelectTrigger className="w-full min-h-11" data-slot="class-room"><SelectValue /></SelectTrigger><SelectContent>{g.rooms.map((r) => <SelectItem key={r.id} value={r.id}>{r.name} · {r.type}</SelectItem>)}</SelectContent></Select>
+            <Select value={roomId} onValueChange={setRm} disabled={locked}><SelectTrigger className="w-full min-h-11" data-slot="class-room"><SelectValue /></SelectTrigger><SelectContent>{g.rooms.filter((r) => r.active || r.id === roomId).map((r) => <SelectItem key={r.id} value={r.id}>{r.name} · {r.type}{r.active ? "" : " · ngưng"}</SelectItem>)}</SelectContent></Select>
           </div>
           <div className="space-y-1.5">
             <Label htmlFor="cls-cap">Sức chứa</Label>
-            <Input id="cls-cap" type="number" min={1} value={capacity} onChange={(e) => setCapacity(e.target.value)} className="min-h-11" />
+            <Input id="cls-cap" type="number" min={1} value={capacity} disabled={locked} onChange={(e) => setCapacity(e.target.value)} className="min-h-11" />
           </div>
           <AbsentDeductField value={absentDeduct} onChange={setAbsentDeduct} />
         </div>
       </section>
       <Separator />
-      <section className="space-y-3">
+      <fieldset disabled={locked} className="space-y-3">
         <p className="text-xs font-semibold tracking-wide text-muted-foreground uppercase">Lịch lặp</p>
         <div className="grid grid-cols-1 gap-3">
           <div className="space-y-1.5">
@@ -331,7 +396,7 @@ export function ClassCreatePage() {
           <Input id="cls-ed" type="date" disabled={!hasEnd} value={endDate} onChange={(e) => setEndDate(e.target.value)} className="min-h-11" />
         </div>
         <p className="text-sm text-muted-foreground">{formatRecurrence(rec)}{invalid ? " · giờ không hợp lệ" : ""}</p>
-      </section>
+      </fieldset>
       <HoldBoard
         g={g}
         days={days}
@@ -348,7 +413,9 @@ export function ClassCreatePage() {
         </AlertTitle>
         <AlertDescription>
           {clashN
-            ? "Đổi GV, phòng hoặc giờ — trùng hiện đỏ trên lịch. Mở lớp sẽ bỏ buổi trùng."
+            ? clashN >= 5
+              ? "≥5 buổi trùng — không lưu. Xem lịch tháng."
+              : "1–4 buổi trùng: lưu buổi trống, rồi xếp học bù hoặc bỏ."
             : course ? planLabel(course.plan) : "Chưa chọn khóa"}
         </AlertDescription>
         {clashRows.length ? (
@@ -465,16 +532,35 @@ export function ClassCreatePage() {
   );
 
   const saveBtn = write ? (
-    <Button data-slot="class-save" onClick={save} disabled={!courseId || invalid || !days.length}>
-      {clashN ? `Mở lớp · bỏ ${clashN} trùng` : "Mở lớp"}
+    <Button data-slot="class-save" onClick={save} disabled={(!editing && !courseId) || invalid || !days.length || locked}>
+      {locked ? "Không đổi lịch" : clashN >= 5 ? "Xem trùng · không lưu" : editing ? (clashN ? `Lưu · ${clashN} trùng` : "Lưu lớp") : (clashN ? `Mở lớp · ${clashN} trùng` : "Mở lớp")}
     </Button>
   ) : undefined;
+
+  const dialogs = (
+    <>
+      <ClashBlockDialog open={blockOpen} result={pending} onClose={() => setBlockOpen(false)} />
+      <ClashCoverDialog
+        open={coverOpen}
+        result={pending}
+        classId={pending?.classId || editClass?.id || ""}
+        teacherId={teacherId}
+        roomId={roomId}
+        duration={duration}
+        onDone={() => {
+          setCoverOpen(false);
+          const id = pending?.classId || editClass?.id;
+          if (id) go("lop-detail", id);
+        }}
+      />
+    </>
+  );
 
   if (phone) {
     return (
       <div className="flex min-h-0 flex-1 flex-col" data-slot="lop-moi">
         <PageHead
-          trail={[{ label: "Lớp", go: "lop" }, { label: "Mở lớp" }]}
+          trail={[{ label: "Lớp", go: "lop" }, { label: editing ? "Sửa lớp" : "Mở lớp" }]}
           actions={saveBtn}
         />
         <div role="tablist" data-slot="lop-moi-tabs" className="grid grid-cols-2 gap-1 border-b px-3 py-1">
@@ -500,6 +586,7 @@ export function ClassCreatePage() {
         {phonePane === "form" ? (
           <div className="min-h-0 flex-1 overflow-auto">{form}</div>
         ) : cal}
+        {dialogs}
       </div>
     );
   }
@@ -507,13 +594,14 @@ export function ClassCreatePage() {
   return (
     <div className="flex min-h-0 flex-1 flex-col" data-slot="lop-moi">
       <PageHead
-        trail={[{ label: "Lớp", go: "lop" }, { label: "Mở lớp từ khóa" }]}
+        trail={[{ label: "Lớp", go: "lop" }, { label: editing ? "Sửa lớp" : "Mở lớp từ khóa" }]}
         actions={saveBtn}
       />
       <div className="flex min-h-0 min-w-0 flex-1 overflow-hidden">
         <aside className="flex w-[22rem] shrink-0 flex-col overflow-auto border-r bg-card">{form}</aside>
         {cal}
       </div>
+      {dialogs}
     </div>
   );
 }

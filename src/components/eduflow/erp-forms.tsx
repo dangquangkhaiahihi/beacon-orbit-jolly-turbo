@@ -66,7 +66,6 @@ export function ErpDialogs() {
   const updateEnroll = useEdu((s) => s.updateEnroll);
   const createStaff = useEdu((s) => s.createStaff);
   const updateStaff = useEdu((s) => s.updateStaff);
-  const updateClass = useEdu((s) => s.updateClass);
   const peekStack = useEdu((s) => s.peekStack);
   const route = useEdu((s) => s.route);
 
@@ -92,10 +91,8 @@ export function ErpDialogs() {
   const [roles, setRoles] = useState<string[]>(["assistant"]);
   const [invite, setInvite] = useState(true);
   const [branchIds, setBranchIds] = useState<string[]>([]);
-  const [teacherId, setTeacherId] = useState("");
-  const [roomId, setRoomId] = useState("");
 
-  const erp: ModalKind[] = ["branch", "room", "teacher", "student", "guardian", "enroll", "staff", "class"];
+  const erp: ModalKind[] = ["branch", "room", "teacher", "student", "guardian", "enroll", "staff"];
   const open = !!modal && erp.includes(modal);
 
   useEffect(() => {
@@ -155,15 +152,6 @@ export function ErpDialogs() {
     } else if (modal === "staff") {
       setName(""); setPhone(""); setTitle("Trợ lý"); setRoles(["assistant"]); setInvite(true);
     }
-    if (modal === "class" && editId) {
-      const c = one(g.classes, editId);
-      if (c) {
-        setName(c.name);
-        setTeacherId(c.default_teacher_id);
-        setRoomId(c.default_room_id);
-        setCap(String(c.capacity));
-      }
-    }
   }, [modal, editId, open, g, route.n, route.id, peekStack]);
 
   if (!g) return null;
@@ -179,7 +167,6 @@ export function ErpDialogs() {
     guardian: ["Phụ huynh mới", "Gắn vào học sinh đang mở. SĐT bắt buộc."],
     enroll: [editId ? "Sửa ghi danh" : "Ghi danh", "Xếp chỗ. Buổi học / hạn đóng chỉ tăng khi thu học phí."],
     staff: [editId ? "Sửa nhân sự" : "Mời nhân sự", "Hồ sơ + nhiều vai. Giáo viên resource tách riêng."],
-    class: ["Sửa lớp", "Đổi tên, GV, phòng, sĩ số. Lịch buổi giữ nguyên."],
   };
   const [t, d] = titles[modal || "branch"] || ["", ""];
 
@@ -212,9 +199,6 @@ export function ErpDialogs() {
       if (modal === "staff") {
         const draft = { full_name: name, phone, title, roles, invite };
         editId ? updateStaff(editId, draft) : createStaff(draft);
-      }
-      if (modal === "class" && editId) {
-        updateClass(editId, { name, teacher_id: teacherId, room_id: roomId, capacity: Number(cap) || 0 });
       }
     }}>
       {modal === "branch" ? (
@@ -404,25 +388,6 @@ export function ErpDialogs() {
               <Switch checked={invite} onCheckedChange={setInvite} />
             </div>
           ) : null}
-        </section>
-      ) : null}
-      {modal === "class" ? (
-        <section className="space-y-3">
-          <p className="text-xs font-semibold tracking-wide text-muted-foreground uppercase">Lớp</p>
-          <Field label="Tên *"><Input value={name} onChange={(e) => setName(e.target.value)} /></Field>
-          <Field label="Giáo viên *">
-            <Select value={teacherId} onValueChange={setTeacherId}>
-              <SelectTrigger className="w-full"><SelectValue /></SelectTrigger>
-              <SelectContent>{g.teachers.map((t) => <SelectItem key={t.id} value={t.id}>{t.name}</SelectItem>)}</SelectContent>
-            </Select>
-          </Field>
-          <Field label="Phòng *">
-            <Select value={roomId} onValueChange={setRoomId}>
-              <SelectTrigger className="w-full"><SelectValue /></SelectTrigger>
-              <SelectContent>{g.rooms.map((r) => <SelectItem key={r.id} value={r.id}>{r.name}</SelectItem>)}</SelectContent>
-            </Select>
-          </Field>
-          <Field label="Sĩ số *"><Input type="number" min={1} value={cap} onChange={(e) => setCap(e.target.value)} /></Field>
         </section>
       ) : null}
     </Shell>

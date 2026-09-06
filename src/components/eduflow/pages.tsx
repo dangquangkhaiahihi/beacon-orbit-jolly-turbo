@@ -540,7 +540,7 @@ export function Lop() {
           pos={menu.pos}
           onClose={() => setMenu(null)}
           onDetail={() => go("lop-detail", menu.row.id)}
-          onEdit={write ? () => setModal("class", menu.row.id) : undefined}
+          onEdit={write ? () => go("lop-moi", menu.row.id) : undefined}
           onDelete={write ? () => setPending(menu.row) : undefined}
         />
       ) : null}
@@ -561,6 +561,7 @@ export function LopDetail() {
   const role = useEdu((s) => s.role);
   const workspace = useEdu((s) => s.workspace);
   const setModal = useEdu((s) => s.setModal);
+  const go = useEdu((s) => s.go);
   const deleteClass = useEdu((s) => s.deleteClass);
   const setAbsentDeduct = useEdu((s) => s.setAbsentDeduct);
   const pushPeek = useEdu((s) => s.pushPeek);
@@ -589,7 +590,7 @@ export function LopDetail() {
         actions={
           <div className="flex items-center gap-1">
             {canWrite(role, "enrollment") ? <Button onClick={() => setModal("enroll")}><Plus className="size-4" /> Ghi danh</Button> : null}
-            {canWrite(role, "class") ? <PageMore onEdit={() => setModal("class", c.id)} onDelete={() => setConfirm(true)} /> : null}
+            {canWrite(role, "class") ? <PageMore onEdit={() => go("lop-moi", c.id)} onDelete={() => setConfirm(true)} /> : null}
           </div>
         }
       />

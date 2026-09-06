@@ -363,6 +363,10 @@ export function LessonCalendar({
           openPeek("class", occ.event.data.classId);
           return;
         }
+        if (e.shiftKey) {
+          useEdu.getState().setModal("lesson-sched", occ.event.id);
+          return;
+        }
         onLessonClick(occ.event.id, e);
       }}
       onSelectSlot={(slot) => onEmptySlot?.(slot.start, slot.end)}

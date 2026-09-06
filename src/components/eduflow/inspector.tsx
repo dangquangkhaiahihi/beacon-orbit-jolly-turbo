@@ -304,6 +304,7 @@ export function ClassPeek({ g, id }: { g: Graph; id: string }) {
   const c = one(g.classes, id);
   const pushPeek = useEdu((s) => s.pushPeek);
   const setModal = useEdu((s) => s.setModal);
+  const go = useEdu((s) => s.go);
   const role = useEdu((s) => s.role);
   if (!c) return null;
   const rec = c.recurrence;
@@ -356,6 +357,9 @@ export function ClassPeek({ g, id }: { g: Graph; id: string }) {
           </li>
         ))}
       </ul>
+      {canWrite(role, "class") ? (
+        <Button className="mt-4 w-full" variant="outline" data-slot="peek-edit-class" onClick={() => go("lop-moi", id)}>Sửa lịch</Button>
+      ) : null}
     </div>
   );
 }
@@ -533,6 +537,8 @@ export function StaffPeek({ g, id }: { g: Graph; id: string }) {
 export function LessonPeek({ g, id, tab }: { g: Graph; id: string; tab?: LessonTab }) {
   const go = useEdu((s) => s.go);
   const pushPeek = useEdu((s) => s.pushPeek);
+  const setModal = useEdu((s) => s.setModal);
+  const role = useEdu((s) => s.role);
   const les = one(g.lessons, id);
   if (!les) return null;
   const n = g.enrollments.filter((e) => e.class_id === les.class_id && e.status === "active").length;
@@ -591,6 +597,9 @@ export function LessonPeek({ g, id, tab }: { g: Graph; id: string; tab?: LessonT
         return bits.length ? <p className="mt-3 text-xs text-muted-foreground">{bits.join(" · ")}</p> : null;
       })()}
       <Button className="mt-4 w-full" data-slot="peek-work" onClick={() => go("buoi-detail", id, { tab: workTab })}>{cta}</Button>
+      {canWrite(role, "class") ? (
+        <Button className="mt-2 w-full" variant="outline" data-slot="peek-lesson-sched" onClick={() => setModal("lesson-sched", id)}>Đổi lịch buổi</Button>
+      ) : null}
     </div>
   );
 }
